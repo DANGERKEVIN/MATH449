@@ -1,0 +1,226 @@
+# age - patient's age in years
+# anemia - if decrease in red blood cells or hemoglobin (1 - yes // 0 - no)
+# HBP - if patient has hypertension (1 - yes // 0 - no)
+# CPK - level of the CPK (creatinine phosphokinase) enzyme in the blood (mcg/L)
+# diabetes: if the patient has diabetes (1 - yes // 0 - no)
+# ejection: percentage of blood leaving the heart at each contraction (percentage)
+# platelets: platelets in the blood (kiloplatelets/mL)
+# sex: (1 - male // 0 - female)
+# Creatinine: level of serum creatinine in the blood (mg/dL)
+# Sodium: level of serum sodium in the blood (mEq/L)
+# smoking: if the patient smokes or not (1 - yes // 0 - no)
+# time: follow-up period (days)
+# death event: if the patient deceased during the follow-up period (1 - yes // 0 - no)
+
+####################
+# Required Libraries
+####################
+library(readxl)
+library(ggplot2)
+library(lattice)
+library(leaps)
+library(Epi)
+library(randomForest)
+library(boot)
+library(dplyr)
+
+##################
+# Data Preparation
+##################
+heart = read_excel("C:/Users/Kevin/Downloads/heartFailure.xlsx")
+names(heart)
+attach(heart)
+heart$anemia = as.factor(anemia)
+heart$HBP = as.factor(HBP)
+heart$diabetes = as.factor(diabetes)
+heart$sex = as.factor(sex)
+heart$smoking = as.factor(smoking)
+heart$death = as.factor(death)
+
+###############
+# Class Balance
+###############
+barplot(prop.table(table(heart$death)), col=rainbow(2), ylim=c(0,1), main = "Survival Status")
+prop.table(table(heart$death)) # About twice as many survivals as there are deaths
+table(heart$death)
+# Not too imbalanced
+
+
+#################################
+# Create Training/Test Set To Use
+#################################
+set.seed(123)
+trainingRows = sample(1:nrow(heart), nrow(heart)*0.75)
+training = heart[trainingRows,]
+table(training$death)
+test = heart[-trainingRows,]
+table(test$death)
+
+######################################
+# Logistic Regression & Model Accuracy
+######################################
+heart.glm = glm(death ~ ., data = training, family = binomial)
+summary(heart.glm)
+# Age, ejection, Creatinine, time are significant (all else insignificant)
+glm.prob=predict(heart.glm, test, type="response")
+glm.pred=rep("0",nrow(test))
+glm.pred[glm.prob>0.5] = "1"
+table(glm.pred, test$death)
+mean(glm.pred==test$death)              # 76% correct // 20% false negative // 35% false positive
+
+# Using only Significant Factors
+heart.glm1=glm(death ~ age + ejection + Creatinine + time, data = training, family = binomial)
+summary(heart.glm1)
+glm.probS1=predict(heart.glm1, test, type="response")
+glm.predS1=rep("0",nrow(test))
+glm.predS1[glm.probS1>0.5] = "1"
+table(glm.predS1, test$death)
+mean(glm.predS1==test$death)              # 77.33% correct // 19.64% false negative // 31.58% false positive 
+
+#################################
+# Testing Different Cutoff Points
+#################################
+
+# Using All Predictors
+pi0=seq(0.1,0.9, by = 0.1)
+for (i in pi0){
+  glm.prob=predict(heart.glm, test, type="response")
+  glm.pred=rep("0",nrow(test))
+  glm.pred[glm.prob>i] = "1"
+  cat(" \n\n")
+  str1 = "Cutoff Point: "
+  str2 = i
+  string = paste(str1, str2)
+  print(string)
+  print(table(glm.pred, test$death))
+  print(mean(glm.pred==test$death))      # Proportion of Correct Predictions 
+}
+
+# Using Sig. Predictors Only
+pi0=seq(0.1,0.9, by = 0.1)
+for (i in pi0){
+  glm.prob=predict(heart.glm1, test, type="response")
+  glm.pred=rep("0",nrow(test))
+  glm.pred[glm.prob>i] = "1"
+  cat(" \n\n")
+  str1 = "Cutoff Point: "
+  str2 = i
+  string = paste(str1, str2)
+  print(string)
+  print(table(glm.pred, test$death))
+  print(mean(glm.pred==test$death))      # Proportion of Correct Predictions 
+}
+
+#####################
+# Plotting ROC Curves
+#####################
+ROC(form=death ~ age + anemia + CPK + diabetes + ejection + HBP + platelets + Creatinine + Sodium + sex + smoking + time, plot = "ROC") #AUC = 0.897 // eta = 0.454
+glm.pred1=rep("0",nrow(test))
+glm.pred1[glm.prob>0.454] = "1"
+table(glm.pred1, test$death)
+mean(glm.pred1==test$death)              # Same results obtained using ROC obtained cutoff point
+
+ROC(form=death ~ age + ejection + Creatinine + time, plot = "ROC") #AUC = 0.891 // eta = 0.312
+glm.prob2=predict(heart.glm1, test, type="response")
+glm.pred2=rep("0",nrow(test))
+glm.pred2[glm.prob2>0.495] = "1"
+table(glm.pred2, test$death)
+mean(glm.pred2==test$death)              # Same result obtained using ROC obtained cutoff
+
+#########
+# Bagging
+#########
+library(randomForest)
+bagging.heart=randomForest(death~.,data=training,mtry=12,importance=TRUE)
+bagging.heart
+importance(bagging.heart)
+varImpPlot(bagging.heart)
+# Time, Creatinine, ejection are top 3 predictors
+
+
+################################
+# Leave-One-Out Cross-Validation
+################################
+set.seed(123)
+cv.error=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(Creatinine,i),data=heart, family = binomial)
+  cv.error[i]=cv.glm(heart,glm.fit)$delta[1]
+}
+cv.error # 3nd degree polynomial seems to be the best choice
+
+glm.fit3 = glm(death~poly(Creatinine,3),data=training, family = binomial)
+glm.prob3=predict(glm.fit3, test, type="response")
+glm.pred3=rep("0",nrow(test))
+glm.pred3[glm.prob3>0.5] = "1"
+table(glm.pred3, test$death)
+mean(glm.pred3==test$death)          # 69.33% correct // 27.42% false negative // 46.15% false positive
+
+cv.error=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(ejection,i),data=heart, family = binomial)
+  cv.error[i]=cv.glm(heart,glm.fit)$delta[1]
+}
+cv.error # 3rd degree polynomial appears to best selection
+
+glm.fit3a = glm(death~poly(ejection,3),data=training, family = binomial)
+glm.prob3a=predict(glm.fit3a, test, type="response")
+glm.pred3a=rep("0",nrow(test))
+glm.pred3a[glm.prob3a>0.5] = "1"
+table(glm.pred3a, test$death)
+mean(glm.pred3a==test$death)          # 70.67% correct // 24.56% false negative // 44.44% false positive 
+
+cv.error=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(time,i),data=heart, family = binomial)
+  cv.error[i]=cv.glm(heart,glm.fit)$delta[1]
+}
+cv.error # 5th order polynomial appears to be best fit for time
+
+glm.fit5 = glm(death~poly(time, 5),data=training, family = binomial)
+glm.prob5=predict(glm.fit5, test, type="response")
+glm.pred5=rep("0",nrow(test))
+glm.pred5[glm.prob5>0.5] = "1"
+table(glm.pred5, test$death)
+mean(glm.pred5==test$death)           # 81.33% correct // 18.64% false negative // 18.75% false positive
+
+#########################
+# K-Fold Cross-Validation
+#########################
+set.seed(123)
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(Creatinine,i),data=heart, family = binomial)
+  cv.error.10[i]=cv.glm(heart,glm.fit,K=10)$delta[1]
+}
+cv.error.10
+# 3-fold model produced lowest CV Error for Creatinine
+
+
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(ejection,i),data=heart, family = binomial)
+  cv.error.10[i]=cv.glm(heart,glm.fit,K=10)$delta[1]
+}
+cv.error.10
+# 3-fold model produced lowest CV Error for ejection
+
+cv.error.10=rep(0,10)
+for (i in 1:10){
+  glm.fit=glm(death~poly(time,i),data=heart, family = binomial)
+  cv.error.10[i]=cv.glm(heart,glm.fit,K=10)$delta[1]
+}
+cv.error.10 # 5-fold produces lowest error for time
+
+########################
+# Probit & Identity Link
+########################
+training.probit = glm(death ~ ., family=binomial(link="probit"), data=training)
+summary(training.probit)
+
+training.identity2 = glm(death ~ anemia + diabetes + HBP + sex + smoking, family=binomial(link="identity"), data=training)
+summary(training.identity2)
+
+
+
+
